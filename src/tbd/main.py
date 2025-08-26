@@ -230,90 +230,85 @@ def _doc_text(doc: DocOut) -> str:
             if ln.text: parts.append(ln.text)
     return "\n".join(parts)
 
-
-# --- replace the whole upsert_document() in main.py ---
+# --- REPLACE upsert_document IN src/tbd/main.py ---
 
 def upsert_document(doc: DocOut):
     meta, _ = _load_index()
 
-    # Build the raw text for the new doc
-    new_txt = _doc_text(doc)
-    if not new_txt.strip():
-        new_txt = "[[EMPTY-DOC]]"
+    # 1) Normalize / build corpus
+    def _norm(t: str) -> str:
+        t = (t or "").strip()
+        return t if t else "[[EMPTY-DOC]]"
 
-    # Start with existing texts (if any)
-    texts = [m.get("text","") or "[[EMPTY-DOC]]" for m in meta.get("docs", [])]
-    texts.append(new_txt)
+    corpus = [_norm(d.get("text", "")) for d in meta.get("docs", [])]
+    new_text = _norm(_doc_text(doc))
+    corpus.append(new_text)
 
-    # Adaptive TF-IDF params for small corpora
-    n_docs = len(texts)
+    # Optional: drop exact duplicates to keep the vectorizer stable
+    # (but still store the new doc in meta)
+    corpus_unique = list(dict.fromkeys(corpus))  # preserves order
+
+    n_docs = len(corpus_unique)
+
+    # 2) Choose safe TF-IDF params based on corpus size
     if n_docs <= 2:
+        # 1–2 docs: never prune by df
         vec = TfidfVectorizer(min_df=1, max_df=1.0, ngram_range=(1, 2))
     elif n_docs <= 5:
+        # very small: prune almost nothing
         vec = TfidfVectorizer(min_df=1, max_df=0.9999, ngram_range=(1, 2))
     else:
         vec = TfidfVectorizer(min_df=1, max_df=0.95, ngram_range=(1, 2))
 
-    # Fit with a safety net
+    # 3) Fit with safety fallbacks
     try:
-        X = vec.fit_transform(texts).toarray().astype(np.float32)
-    except ValueError:
-        # Extremely sparse / uniform corpus – back off to unigrams with max_df=1.0
+        X = vec.fit_transform(corpus_unique)
+        if X.shape[1] == 0:
+            raise ValueError("no terms after pruning")
+        X = X.toarray().astype(np.float32)
+    except Exception:
+        # Back off to the most permissive settings
         vec = TfidfVectorizer(min_df=1, max_df=1.0, ngram_range=(1, 1))
-        X = vec.fit_transform(texts).toarray().astype(np.float32)
+        X = vec.fit_transform(corpus_unique).toarray().astype(np.float32)
 
-    # Write back meta + vectors
+    # 4) Map unique-matrix rows back to full corpus length if you need 1:1,
+    #    otherwise just store vectors for the unique set. Here we re-compute
+    #    for the full corpus using the fitted vocabulary so shapes align.
+    X_full = TfidfVectorizer(vocabulary=vec.vocabulary_).fit_transform(corpus).toarray().astype(np.float32)
+
+    # 5) Persist meta + vectors
     meta.setdefault("docs", [])
-    meta["docs"] = [
-        {"doc_id": d.get("doc_id",""), "backend": d.get("backend",""), "text": d.get("text",""), "ts": d.get("ts",0)}
-        for d in meta["docs"]
-    ]
-    meta["docs"].append({"doc_id": doc.doc_id, "backend": doc.backend, "text": new_txt, "ts": time.time()})
+    meta["docs"].append({
+        "doc_id": doc.doc_id,
+        "backend": doc.backend,
+        "text": new_text,
+        "ts": time.time(),
+    })
 
-    _save_index(meta, X)
+    _save_index(meta, X_full)
+
+
+def stats():
+    meta, X = _load_index()
+    return {"num_docs": len(meta["docs"]), "vec_shape": None if X is None else list(X.shape)}
 
 # ---------------- FIBO (minimal) ----------------
-# --- replace the whole upsert_document() in main.py ---
-
-def upsert_document(doc: DocOut):
-    meta, _ = _load_index()
-
-    # Build the raw text for the new doc
-    new_txt = _doc_text(doc)
-    if not new_txt.strip():
-        new_txt = "[[EMPTY-DOC]]"
-
-    # Start with existing texts (if any)
-    texts = [m.get("text","") or "[[EMPTY-DOC]]" for m in meta.get("docs", [])]
-    texts.append(new_txt)
-
-    # Adaptive TF-IDF params for small corpora
-    n_docs = len(texts)
-    if n_docs <= 2:
-        vec = TfidfVectorizer(min_df=1, max_df=1.0, ngram_range=(1, 2))
-    elif n_docs <= 5:
-        vec = TfidfVectorizer(min_df=1, max_df=0.9999, ngram_range=(1, 2))
-    else:
-        vec = TfidfVectorizer(min_df=1, max_df=0.95, ngram_range=(1, 2))
-
-    # Fit with a safety net
-    try:
-        X = vec.fit_transform(texts).toarray().astype(np.float32)
-    except ValueError:
-        # Extremely sparse / uniform corpus – back off to unigrams with max_df=1.0
-        vec = TfidfVectorizer(min_df=1, max_df=1.0, ngram_range=(1, 1))
-        X = vec.fit_transform(texts).toarray().astype(np.float32)
-
-    # Write back meta + vectors
-    meta.setdefault("docs", [])
-    meta["docs"] = [
-        {"doc_id": d.get("doc_id",""), "backend": d.get("backend",""), "text": d.get("text",""), "ts": d.get("ts",0)}
-        for d in meta["docs"]
-    ]
-    meta["docs"].append({"doc_id": doc.doc_id, "backend": doc.backend, "text": new_txt, "ts": time.time()})
-
-    _save_index(meta, X)
-
+FIBO_INDEX = "data/fibo_index.json"
+def fibo_search(q: str, limit=25):
+    if not os.path.exists(FIBO_INDEX): return []
+    idx = json.loads(open(FIBO_INDEX).read())
+    classes = idx.get("classes", [])
+    labels = [(c.get("label") or c["uri"].split("/")[-1]) for c in classes]
+    ns     = [c.get("ns","") for c in classes]
+    vec = TfidfVectorizer(min_df=1).fit(labels + [q])
+    qv = vec.transform([q]).toarray()
+    Cv = vec.transform(labels).toarray()
+    sims = cosine_similarity(qv, Cv)[0]
+    order = np.argsort(-sims)[:limit]
+    out=[]
+    for i in order:
+        out.append({"uri": classes[i]["uri"], "label": labels[i], "ns": ns[i], "score": float(sims[i])})
+    return out
 
 # ---------------- FastAPI ----------------
 app = FastAPI()

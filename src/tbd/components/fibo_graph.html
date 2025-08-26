@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  html,body{height:100%; margin:0; background:#fff; font-family:system-ui, sans-serif;}
+  #toolbar{padding:8px; background:#f6f6f6; border-bottom:1px solid #ddd; display:flex; gap:8px; align-items:center}
+  .btn{padding:6px 10px; border:1px solid #bbb; background:#fff; border-radius:6px; cursor:pointer}
+  .btn:hover{background:#f0f0f0}
+  #viz{width:100%; height:calc(100% - 46px)}
+  .node circle{stroke:#333; stroke-width:1px; fill:#e8eef7}
+  .node text{font-size:12px; pointer-events:none}
+  .link{stroke:#9aa7bd; stroke-width:1px}
+  .tooltip{position:absolute; pointer-events:none; background:#111; color:#fff; padding:6px 8px; border-radius:6px; font-size:12px; opacity:0; transition:opacity .1s; max-width:420px}
+</style>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="fit" class="btn">Fit</button>
+    <button id="max" class="btn">⤢ Maximize</button>
+    <div id="status" style="margin-left:auto;color:#666;font-size:12px;">Click a node to select</div>
+  </div>
+  <div id="viz"></div>
+  <div id="tooltip" class="tooltip"></div>
+<script>
+(function(){
+  const data = window.graphData || {nodes:[], links:[]};
+  const apiBase = window.apiBase || "";
+  const viz = document.getElementById("viz");
+  const tip = document.getElementById("tooltip");
+
+  const svg = d3.select("#viz").append("svg");
+  const g = svg.append("g");
+  const link = g.append("g").attr("class","links").selectAll("line")
+                .data(data.links).enter().append("line").attr("class","link");
+  const node = g.append("g").attr("class","nodes").selectAll("g")
+                .data(data.nodes).enter().append("g").attr("class","node")
+                .call(d3.drag()
+                  .on("start", (event,d)=>{ if(!event.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+                  .on("drag", (event,d)=>{ d.fx=event.x; d.fy=event.y; })
+                  .on("end",  (event,d)=>{ if(!event.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
+
+  node.append("circle").attr("r", 10);
+  node.append("text").attr("x", 12).attr("y", 4).text(d => (d.label || d.id || "").slice(0,60));
+  link.append("title").text(d => d.kind === 'property' ? (d.label || 'property') : 'subClassOf');
+
+  const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (ev)=>g.attr("transform", ev.transform));
+  svg.call(zoom);
+
+  let width=0, height=0;
+  function size(){
+    width = viz.clientWidth; height = viz.clientHeight;
+    svg.attr("width", width).attr("height", height);
+    sim.force("center", d3.forceCenter(width/2, height/2));
+    sim.alpha(0.1).restart();
+  }
+  window.addEventListener("resize", size);
+  document.addEventListener("fullscreenchange", size);
+
+  const sim = d3.forceSimulation(data.nodes)
+    .force("link", d3.forceLink(data.links).id(d=>d.id).distance(90).strength(0.4))
+    .force("charge", d3.forceManyBody().strength(-280))
+    .force("center", d3.forceCenter(0,0));
+
+  sim.on("tick", ()=>{
+    link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+    node.attr("transform", d=>`translate(${d.x},${d.y})`);
+  });
+
+  function fitToGraph(pad=40){
+    if(!data.nodes.length){ return; }
+    const xs = data.nodes.map(n=>n.x), ys = data.nodes.map(n=>n.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const gW = (maxX - minX) || 1, gH = (maxY - minY) || 1;
+    const s = Math.min((width - pad)/gW, (height - pad)/gH, 3);
+    const tx = (width - s*(minX+maxX))/2;
+    const ty = (height - s*(minY+maxY))/2;
+    svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(s));
+  }
+
+  node.on("click", async (_, d)=>{
+    try{
+      if (apiBase) {
+        await fetch(apiBase + "/ui/set_selection?uri=" + encodeURIComponent(d.id), {method:"POST"});
+      }
+      document.getElementById("status").textContent = "Selected: " + d.id.split("/").pop();
+    }catch(e){}
+  });
+
+  node.on("mouseenter", (ev, d)=>{
+    tip.innerHTML = `<b>${d.label||d.id}</b><br><span style="color:#ccc;font-size:12px">${d.id}</span>`;
+    tip.style.opacity=1; tip.style.left=(ev.pageX+10)+'px'; tip.style.top=(ev.pageY+10)+'px';
+  });
+  node.on("mouseleave", ()=> tip.style.opacity=0);
+
+  document.getElementById("fit").onclick = fitToGraph;
+  document.getElementById("max").onclick = ()=>{
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  };
+
+  size();
+  // initial settle then fit
+  setTimeout(()=>fitToGraph(), 400);
+})();
+</script>
+</body>
+</html>

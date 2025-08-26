@@ -4,6 +4,10 @@ from dataclasses import asdict
 from typing import List, Dict
 import streamlit as st
 from PIL import Image, ImageDraw
+import json, requests
+from pathlib import Path
+from core.fibo_graph import build_subgraph
+import json, hashlib
 
 # local imports
 from main import (
@@ -33,12 +37,6 @@ colL, colR = st.columns([1.1, 1.9], gap="medium")
 
 # -------- Left: FIBO & doc table --------
 with colL:
-    st.subheader("FIBO search")
-    q = st.text_input("Search FIBO (free text):", placeholder="e.g., lease, invoice, guarantee…")
-    if q:
-        hits = fibo_search(q, limit=15)
-        for h in hits:
-            st.markdown(f"- **{h['label']}**  \n  `{h['ns']}`")
 
     st.subheader("Indexed documents")
     idx = stats()
@@ -143,3 +141,5 @@ with colR:
         st.success("Saved.")
 
     st.download_button("Download full JSON", json.dumps(dj, indent=2), file_name=f"{dj['doc_id']}.json", mime="application/json")
+
+
